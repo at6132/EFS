@@ -60,13 +60,13 @@ from mexcpy.api import MexcFuturesAPI
 
 # MEXC API Configuration
 from config import get_api_token, get_account_name
-TRADING_SYMBOL = "ARKM_USDT"                  # Trading pair
+TRADING_SYMBOL = "THETA_USDT"                  # Trading pair
 MEXC_API_TOKEN = get_api_token(TRADING_SYMBOL)
 USE_TESTNET = False                           # Set to False for live trading
 
 # Symbol-Specific Configuration
 SYMBOL_DECIMALS = 4                           # Number of decimal places for price (ARKM = 4)
-CONTRACTS_PER_SYMBOL = 10                     # Number of tokens per contract (ARKM = 10)
+CONTRACTS_PER_SYMBOL = 1                     # Number of tokens per contract (ARKM = 10)
 MIN_CONTRACT_SIZE = 1                          # Minimum contract size
 MAX_CONTRACT_SIZE = 1000                       # Maximum contract size
 

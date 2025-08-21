@@ -60,7 +60,7 @@ from mexcpy.api import MexcFuturesAPI
 
 # MEXC API Configuration
 from config import get_api_token, get_account_name
-TRADING_SYMBOL = "ARKM_USDT"                  # Trading pair
+TRADING_SYMBOL = "SEI_USDT"                  # Trading pair
 MEXC_API_TOKEN = get_api_token(TRADING_SYMBOL)
 USE_TESTNET = False                           # Set to False for live trading
 
