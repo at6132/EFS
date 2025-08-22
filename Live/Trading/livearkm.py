@@ -311,6 +311,23 @@ class LiveEFSTrader:
         
         return self.csv_data[-1] if self.csv_data else None
     
+    def get_entry_candle(self) -> Optional[Dict]:
+        """Get the 15m candle that triggered the entry signal"""
+        if not self.csv_data or len(self.csv_data) == 0:
+            return None
+        current_time = datetime.now()
+        for i in range(len(self.csv_data) - 1, -1, -1):
+            candle = self.csv_data[i]
+            if not candle or 'datetime' not in candle:
+                continue
+            try:
+                candle_time = pd.to_datetime(candle['datetime'])
+                if candle_time.minute % 15 == 0: # Check if this is a 15m boundary
+                    return candle
+            except (ValueError, TypeError, KeyError):
+                continue
+        return self.csv_data[-1] if self.csv_data else None
+    
     def ensure_csv_headers(self):
         """Ensure CSV file has proper headers"""
         filename = f"{ORDERBOOK_CSV_PREFIX}_{datetime.now().strftime('%Y%m%d')}.csv"
@@ -1004,53 +1021,75 @@ class LiveEFSTrader:
                 await self.send_telegram_message(f"❌ Invalid position data: entry_price={entry_price}, size={position_size}")
                 return
             
-            # Get current ATR(15m) for TP calculations
-            current_candle = self.get_current_candle()
-            if not current_candle:
-                tprint("❌ No current candle data for ATR calculation")
+            # Get the entry candle (15m candle that triggered signal)
+            entry_candle = self.get_entry_candle()
+            if not entry_candle:
+                tprint("❌ No entry candle data for ATR calculation")
                 return
             
-            # Calculate ATR(15m) from current data
+            # Calculate ATR(15m) from the entry candle
             df = pd.DataFrame(self.historical_candles)
             df = self.calculate_indicators(df)
             if len(df) == 0:
                 tprint("❌ No data for ATR calculation")
                 return
             
-            current_atr_15m = df.iloc[-1]['atr_15m']
-            if pd.isna(current_atr_15m) or current_atr_15m <= 0:
-                tprint(f"❌ Invalid ATR(15m): {current_atr_15m}")
+            # Find the entry candle in our data
+            entry_candle_df = df[df['datetime'].astype(str) == str(entry_candle['datetime'])]
+            if len(entry_candle_df) == 0:
+                tprint("❌ Entry candle not found in calculated data, using latest")
+                entry_atr_15m = df.iloc[-1]['atr_15m']
+            else:
+                entry_atr_15m = entry_candle_df.iloc[0]['atr_15m']
+            
+            if pd.isna(entry_atr_15m) or entry_atr_15m <= 0:
+                tprint(f"❌ Invalid ATR(15m) from entry candle: {entry_atr_15m}")
                 return
             
-            # Calculate TP levels based on ATR
+            # Calculate TP levels based on entry candle ATR(15m)
             if position.get('side') == 'LONG':
-                tp1_price = entry_price + (self.tp1_atr_multiplier * current_atr_15m)
-                tp2_price = entry_price + (self.tp2_atr_multiplier * current_atr_15m)
+                tp1_price = entry_price + (self.tp1_atr_multiplier * entry_atr_15m)
+                tp2_price = entry_price + (self.tp2_atr_multiplier * entry_atr_15m)
                 tp1_side = OrderSide.CloseLong
-                tp2_side = OrderSide.CloseLong
                 
-                # SL: below entry candle low (entry candle is the 15m candle we broke)
-                sl_price = entry_price - current_atr_15m  # Use ATR as rough SL distance
+                # SL: below entry candle low (the 15m candle we broke)
+                sl_price = entry_candle['low'] * 0.9997  # 0.03% buffer below entry candle low
             else:  # SHORT
-                tp1_price = entry_price - (self.tp1_atr_multiplier * current_atr_15m)
-                tp2_price = entry_price - (self.tp2_atr_multiplier * current_atr_15m)
+                tp1_price = entry_price - (self.tp1_atr_multiplier * entry_atr_15m)
+                tp2_price = entry_price - (self.tp2_atr_multiplier * entry_atr_15m)
                 tp1_side = OrderSide.CloseShort
-                tp2_side = OrderSide.CloseShort
                 
-                # SL: above entry candle high (entry candle is the 15m candle we broke)
-                sl_price = entry_price + current_atr_15m  # Use ATR as rough SL distance
+                # SL: above entry candle high (the 15m candle we broke)
+                sl_price = entry_candle['high'] * 1.0003  # 0.03% buffer above entry candle high
             
             # Round prices to correct decimal places for symbol
             tp1_price = round(tp1_price, SYMBOL_DECIMALS)
             tp2_price = round(tp2_price, SYMBOL_DECIMALS)
             sl_price = round(sl_price, SYMBOL_DECIMALS)
             
-            tprint(f"🎯 EFS TP/SL Setup:")
+            tprint(f"🎯 EFS Exit Conditions Setup (from entry candle):")
             tprint(f"   Entry: ${entry_price:.4f}")
-            tprint(f"   ATR(15m): {current_atr_15m:.6f}")
+            tprint(f"   Entry Candle ATR(15m): {entry_atr_15m:.6f}")
             tprint(f"   TP1: ${tp1_price:.4f} ({self.tp1_atr_multiplier}× ATR)")
             tprint(f"   TP2: ${tp2_price:.4f} ({self.tp2_atr_multiplier}× ATR trailing)")
-            tprint(f"   SL: ${sl_price:.4f} (ATR-based)")
+            tprint(f"   SL: ${sl_price:.4f} (entry candle {'low' if position.get('side') == 'LONG' else 'high'} + 0.03% buffer)")
+            
+            # Store EFS exit conditions for monitoring
+            self.efs_exit_conditions = {
+                'entry_price': entry_price,
+                'entry_atr_15m': entry_atr_15m,
+                'tp1_price': tp1_price,
+                'tp2_price': tp2_price,
+                'sl_price': sl_price,
+                'entry_candle_datetime': entry_candle['datetime'],
+                'position_side': position.get('side'),
+                'position_size': position_size,
+                'bars_since_entry': 0,
+                'tp2_armed': False,
+                'highest_favorable_price': entry_price,
+                'lowest_favorable_price': entry_price,
+                'current_trail': None
+            }
             
             # Set TP1 order (limit order)
             tprint(f"🎯 Creating TP1 LIMIT order: {tp1_price:.4f}")
@@ -1061,23 +1100,13 @@ class LiveEFSTrader:
             
             if tp1_order_id:
                 self.tp_order_id = tp1_order_id
+                self.efs_exit_conditions['tp1_order_id'] = tp1_order_id
                 tprint(f"✅ TP1 LIMIT order set: {tp1_order_id}")
                 await self.send_telegram_message(f"🎯 TP1 set: ${tp1_price:.4f} ({self.tp1_atr_multiplier}× ATR)")
-                
-                # Store TP2 price for trailing stop logic
-                self.tp2_price = tp2_price
-                self.tp2_atr_multiplier = self.tp2_atr_multiplier
-                self.entry_price = entry_price
-                self.position_side = position.get('side')
-                
-                # Enable TP2 trailing stop monitoring
-                self.tp2_trailing_enabled = True
-                
             else:
                 tprint(f"❌ TP1 LIMIT order failed")
                 await self.send_telegram_message(f"❌ TP1 order failed")
-                self.manual_tp_monitor = True
-                self.manual_tp_price = tp1_price
+                self.efs_exit_conditions['tp1_order_id'] = None
             
             # Note: No SL order since only one limit order allowed per balance
             # SL will be monitored manually based on ATR and entry candle structure
@@ -1091,6 +1120,136 @@ class LiveEFSTrader:
             await self.send_telegram_message(f"❌ Error setting EFS TP/SL orders: {e}")
             self.manual_tp_monitor = True
             self.manual_tp_price = entry_price * (1 + self.tp1_atr_multiplier * 0.01) if position.get('side') == 'LONG' else entry_price * (1 - self.tp1_atr_multiplier * 0.01)
+    
+    async def execute_sl_exit(self):
+        """Execute SL exit immediately with market order"""
+        try:
+            tprint("🚨 EXECUTING SL EXIT - Placing market order NOW!")
+            await self.send_telegram_message("🚨 EXECUTING SL EXIT - Placing market order NOW!")
+            
+            # 1. Cancel TP order if it exists
+            if self.tp_order_id:
+                tprint(f"🔄 Canceling TP order: {self.tp_order_id}")
+                await self.cancel_order(self.tp_order_id)
+                self.tp_order_id = None
+            
+            # 2. Get position details
+            position_size = abs(self.current_position.get('size', 0))
+            position_side = self.current_position.get('side', 'UNKNOWN')
+            
+            if position_size <= 0:
+                tprint("❌ Invalid position size for SL exit")
+                await self.handle_position_exit("SL")
+                return
+            
+            # 3. Determine close side
+            if position_side == 'LONG':
+                close_side = OrderSide.CloseLong
+            else:
+                close_side = OrderSide.CloseShort
+            
+            # 4. Place market order immediately
+            tprint(f"🚨 SL EXIT: Placing {close_side} market order for {position_size} contracts")
+            
+            close_request = CreateOrderRequest(
+                symbol=self.symbol,
+                side=close_side,
+                vol=position_size,
+                leverage=self.leverage,
+                type=OrderType.MarketOrder,
+                openType=OpenType.Isolated
+            )
+            
+            close_response = await self.api.create_order(close_request)
+            if close_response.success:
+                tprint("✅ SL exit market order placed successfully!")
+                await self.send_telegram_message("✅ SL exit market order placed successfully!")
+                # Wait a moment for order to fill, then handle exit
+                await asyncio.sleep(1)
+                await self.handle_position_exit("SL")
+            else:
+                tprint(f"❌ SL exit market order failed: {close_response.message}")
+                await self.send_telegram_message(f"❌ SL exit market order failed: {close_response.message}")
+                # Try one more time
+                await asyncio.sleep(1)
+                retry_response = await self.api.create_order(close_request)
+                if retry_response.success:
+                    tprint("✅ SL exit retry successful!")
+                    await self.handle_position_exit("SL")
+                else:
+                    tprint(f"❌ SL exit retry also failed: {retry_response.message}")
+                    await self.send_telegram_message(f"❌ SL exit retry also failed: {retry_response.message}")
+            
+        except Exception as e:
+            tprint(f"❌ Error executing SL exit: {e}")
+            await self.send_telegram_message(f"❌ Error executing SL exit: {e}")
+            # Fall back to direct exit
+            await self.handle_position_exit("SL")
+    
+    async def execute_tp_exit(self):
+        """Execute TP exit immediately with market order"""
+        try:
+            tprint("🎯 EXECUTING TP EXIT - Placing market order NOW!")
+            await self.send_telegram_message("🎯 EXECUTING TP EXIT - Placing market order NOW!")
+            
+            # 1. Cancel TP order if it exists
+            if self.tp_order_id:
+                tprint(f"🔄 Canceling TP order: {self.tp_order_id}")
+                await self.cancel_order(self.tp_order_id)
+                self.tp_order_id = None
+            
+            # 2. Get position details
+            position_size = abs(self.current_position.get('size', 0))
+            position_side = self.current_position.get('side', 'UNKNOWN')
+            
+            if position_size <= 0:
+                tprint("❌ Invalid position size for TP exit")
+                await self.handle_position_exit("TP")
+                return
+            
+            # 3. Determine close side
+            if position_side == 'LONG':
+                close_side = OrderSide.CloseLong
+            else:
+                close_side = OrderSide.CloseShort
+            
+            # 4. Place market order immediately
+            tprint(f"🎯 TP EXIT: Placing {close_side} market order for {position_size} contracts")
+            
+            close_request = CreateOrderRequest(
+                symbol=self.symbol,
+                side=close_side,
+                vol=position_size,
+                leverage=self.leverage,
+                type=OrderType.MarketOrder,
+                openType=OpenType.Isolated
+            )
+            
+            close_response = await self.api.create_order(close_request)
+            if close_response.success:
+                tprint("✅ TP exit market order placed successfully!")
+                await self.send_telegram_message("✅ TP exit market order placed successfully!")
+                # Wait a moment for order to fill, then handle exit
+                await asyncio.sleep(1)
+                await self.handle_position_exit("TP")
+            else:
+                tprint(f"❌ TP exit market order failed: {close_response.message}")
+                await self.send_telegram_message(f"❌ TP exit market order failed: {close_response.message}")
+                # Try one more time
+                await asyncio.sleep(1)
+                retry_response = await self.api.create_order(close_request)
+                if retry_response.success:
+                    tprint("✅ TP exit retry successful!")
+                    await self.handle_position_exit("TP")
+                else:
+                    tprint(f"❌ TP exit retry also failed: {retry_response.message}")
+                    await self.send_telegram_message(f"❌ TP exit retry also failed: {retry_response.message}")
+            
+        except Exception as e:
+            tprint(f"❌ Error executing TP exit: {e}")
+            await self.send_telegram_message(f"❌ Error executing TP exit: {e}")
+            # Fall back to direct exit
+            await self.handle_position_exit("TP")
     
     async def handle_sl_exit(self):
         """Handle SL exit with immediate market order"""
@@ -1259,15 +1418,13 @@ Current Balance: ${balance:,.2f}"""
             # Get bid/ask for monitoring
             best_bid, best_ask = await self.get_best_bid_ask()
             
-            # Calculate EFS TP/SL levels
+            # Calculate EFS TP levels (SL is static from entry candle)
             if position_side == 'LONG':
                 tp1_price = entry_price + (self.tp1_atr_multiplier * current_atr_15m)
                 tp2_price = entry_price + (self.tp2_atr_multiplier * current_atr_15m)
-                sl_price = entry_price - current_atr_15m  # ATR-based SL
             else:  # SHORT
                 tp1_price = entry_price - (self.tp1_atr_multiplier * current_atr_15m)
                 tp2_price = entry_price - (self.tp2_atr_multiplier * current_atr_15m)
-                sl_price = entry_price + current_atr_15m  # ATR-based SL
             
             # EFS Exit Condition 1: Entropy re-expansion to mean
             entropy_exit_triggered = False
@@ -1277,44 +1434,17 @@ Current Balance: ${balance:,.2f}"""
                 tprint(f"🔄 EFS Exit: Entropy re-expanded to mean (z-score: {current_entropy_zscore:.2f})")
                 await self.send_telegram_message(f"🔄 EFS Exit: Entropy re-expanded to mean (z-score: {current_entropy_zscore:.2f})")
             
-            # EFS Exit Condition 2: TP2 trailing stop logic
-            if hasattr(self, 'tp2_trailing_enabled') and self.tp2_trailing_enabled:
-                if position_side == 'LONG' and current_price >= tp2_price:
-                    # Price hit TP2 level, update trailing stop
-                    new_tp2_price = current_price - (self.tp2_atr_multiplier * current_atr_15m)
-                    if new_tp2_price > self.tp2_price:
-                        self.tp2_price = new_tp2_price
-                        tprint(f"🔄 TP2 trailing stop updated: ${self.tp2_price:.4f}")
-                        await self.send_telegram_message(f"🔄 TP2 trailing stop updated: ${self.tp2_price:.4f}")
-                
-                elif position_side == 'SHORT' and current_price <= tp2_price:
-                    # Price hit TP2 level, update trailing stop
-                    new_tp2_price = current_price + (self.tp2_atr_multiplier * current_atr_15m)
-                    if new_tp2_price < self.tp2_price:
-                        self.tp2_price = new_tp2_price
-                        tprint(f"🔄 TP2 trailing stop updated: ${self.tp2_price:.4f}")
-                        await self.send_telegram_message(f"🔄 TP2 trailing stop updated: ${self.tp2_price:.4f}")
-                
-                # Check if trailing stop was hit
-                if position_side == 'LONG' and current_price <= self.tp2_price:
-                    tprint(f"🎯 TP2 trailing stop hit at ${current_price:.4f}")
-                    await self.send_telegram_message(f"🎯 TP2 trailing stop hit at ${current_price:.4f}")
-                    await self.handle_position_exit("TP2 Trailing Stop")
-                    return
-                elif position_side == 'SHORT' and current_price >= self.tp2_price:
-                    tprint(f"🎯 TP2 trailing stop hit at ${current_price:.4f}")
-                    await self.send_telegram_message(f"🎯 TP2 trailing stop hit at ${current_price:.4f}")
-                    await self.handle_position_exit("TP2 Trailing Stop")
-                    return
+            # EFS Exit Condition 2: TP2 trailing stop logic (handled in check_efs_exit_conditions)
             
             # Print position status every 30 seconds
             current_time = time.time()
             if not hasattr(self, 'last_position_update') or current_time - self.last_position_update >= 30:
-                tp2_info = f" | TP2: ${self.tp2_price:.4f}" if hasattr(self, 'tp2_price') else ""
+                tp2_info = f" | TP2: ${self.efs_exit_conditions['tp2_price']:.4f}" if hasattr(self, 'efs_exit_conditions') else ""
+                sl_info = f" | SL: ${self.efs_exit_conditions['sl_price']:.4f} (static)" if hasattr(self, 'efs_exit_conditions') else ""
                 entropy_info = f" | Entropy: {current_entropy:.4f} (z: {current_entropy_zscore:.2f})"
                 tprint(f"💰 EFS TRADE UPDATE {datetime.now().strftime('%H:%M:%S')} | {position_side} {position_size:.2f} @ ${entry_price:.4f}")
                 tprint(f"   📊 Bid: ${best_bid:.4f} | Ask: ${best_ask:.4f} | Mid: ${current_price:.4f}")
-                tprint(f"   🎯 TP1: ${tp1_price:.4f} ({self.tp1_atr_multiplier}× ATR) | SL: ${sl_price:.4f} (ATR-based){tp2_info}")
+                tprint(f"   🎯 TP1: ${tp1_price:.4f} ({self.tp1_atr_multiplier}× ATR){tp2_info}{sl_info}")
                 tprint(f"   💵 P&L: {pnl_pct:+.3f}% (${position_size * entry_price * (pnl_pct/100) * self.leverage:.2f})")
                 tprint(f"   🔍 ATR(15m): {current_atr_15m:.6f}{entropy_info}")
                 self.last_position_update = current_time
@@ -1724,7 +1854,7 @@ Current Balance: ${balance:,.2f}"""
                         df = self.calculate_indicators(df)
                         if len(df) > 0:
                             latest = df.iloc[-1]
-                            tprint(f"   📊 Latest: ${latest['close']:.4f} | EMA9: ${latest['ema_9']:.4f} | RSI: {latest['rsi_14']:.1f}")
+                            tprint(f"   📊 Latest: ${latest['close']:.4f} | EMA20: ${latest['ema_20']:.4f} | EMA50: ${latest['ema_50']:.4f}")
                         
                         # Trigger signal generation for new candles
                         if not self.current_position and not self.is_entering_position and len(self.historical_candles) >= self.min_candles_required:
@@ -1800,12 +1930,15 @@ Current Balance: ${balance:,.2f}"""
                             tprint(f"✅ Ready to scan for new signals")
                             last_data_status = current_time
                 
-                # When in position: fetch best bid/ask every second for precise exits and updates
+                # When in position: monitor EFS exit conditions
                 if self.current_position:
-                    # Get fresh orderbook for precise TP/SL monitoring
+                    # Get fresh orderbook for price monitoring
                     await self.get_orderbook()
                     
-                    # Monitor TP order status every second
+                    # Monitor 15m candle closes for EFS exit conditions
+                    await self.monitor_15m_closes()
+                    
+                    # Legacy TP monitoring for fallback
                     if self.tp_order_id:
                         tp_filled = await self.monitor_order_status(self.tp_order_id, 1)  # Check for 1 second
                         if tp_filled == "FILLED":
@@ -1858,25 +1991,37 @@ Current Balance: ${balance:,.2f}"""
                             entry_price = self.current_position['entry_price']
                             position_size = abs(self.current_position['size'])
                             
-                            # Calculate distances and profit
+                            # Calculate distances and profit using ATR-based TP/SL
+                            # Get latest data safely
+                            df = pd.DataFrame(self.historical_candles)
+                            if len(df) > 0:
+                                df = self.calculate_indicators(df)
+                                if len(df) > 0:
+                                    latest = df.iloc[-1]
+                                    current_atr_15m = latest.get('atr_15m', 0.001) if latest is not None else 0.001
+                                else:
+                                    current_atr_15m = 0.001
+                            else:
+                                current_atr_15m = 0.001
+                            
                             if self.current_position['side'] == 'LONG':
-                                tp_price = entry_price * (1 + self.tp_pct)
-                                sl_price = entry_price * (1 - self.sl_pct)
-                                distance_to_tp = ((tp_price - current_ask) / entry_price) * 100
+                                tp1_price = entry_price + (self.tp1_atr_multiplier * current_atr_15m)
+                                sl_price = entry_price - current_atr_15m
+                                distance_to_tp = ((tp1_price - current_ask) / entry_price) * 100
                                 distance_to_sl = ((current_bid - sl_price) / entry_price) * 100
                                 current_profit_pct = ((current_bid - entry_price) / entry_price) * 100
                                 current_profit_usd = (current_bid - entry_price) * position_size
                             else:  # SHORT
-                                tp_price = entry_price * (1 - self.tp_pct)
-                                sl_price = entry_price * (1 + self.sl_pct)
-                                distance_to_tp = ((current_bid - tp_price) / entry_price) * 100
+                                tp1_price = entry_price - (self.tp1_atr_multiplier * current_atr_15m)
+                                sl_price = entry_price + current_atr_15m
+                                distance_to_tp = ((current_bid - tp1_price) / entry_price) * 100
                                 distance_to_sl = ((sl_price - current_ask) / entry_price) * 100
                                 current_profit_pct = ((entry_price - current_ask) / entry_price) * 100
                                 current_profit_usd = (entry_price - current_ask) * position_size
                             
                             tprint(f"💰 TRADE UPDATE {datetime.now().strftime('%H:%M:%S')} | {self.current_position['side']} {position_size:.2f} @ ${entry_price:.4f}")
                             tprint(f"   📊 Bid: ${current_bid:.4f} | Ask: ${current_ask:.4f} | Mid: ${current_price:.4f}")
-                            tprint(f"   🎯 TP: ${tp_price:.4f} ({distance_to_tp:.3f}%) | SL: ${sl_price:.4f} ({distance_to_sl:.3f}%)")
+                            tprint(f"   🎯 TP1: ${tp1_price:.4f} ({distance_to_tp:.3f}%) | SL: ${sl_price:.4f} ({distance_to_sl:.3f}%)")
                             tprint(f"   💵 P&L: {current_profit_pct:+.3f}% (${current_profit_usd:+.2f})")
                             
                             # Check if SL was hit (manual monitoring since no SL order)
@@ -1890,7 +2035,8 @@ Current Balance: ${balance:,.2f}"""
                                     elif current_time - self.sl_hit_time >= 1:  # 1 second delay
                                         tprint(f"🛑 SL confirmed after 1 second! Current bid: {current_bid:.4f}, SL: {sl_price:.4f}")
                                         await self.send_telegram_message(f"🛑 SL CONFIRMED! Bid: ${current_bid:.4f}, SL: ${sl_price:.4f}")
-                                        await self.handle_sl_exit()
+                                        # Immediately execute SL exit with market order
+                                        await self.execute_sl_exit()
                                         delattr(self, 'sl_hit_time')  # Reset for next time
                                 else:
                                     # Price moved back above SL, reset timer
@@ -1907,7 +2053,8 @@ Current Balance: ${balance:,.2f}"""
                                     elif current_time - self.sl_hit_time >= 1:  # 1 second delay
                                         tprint(f"🛑 SL confirmed after 1 second! Current ask: {current_ask:.4f}, SL: {sl_price:.4f}")
                                         await self.send_telegram_message(f"🛑 SL CONFIRMED! Ask: ${current_ask:.4f}, SL: ${sl_price:.4f}")
-                                        await self.handle_sl_exit()
+                                        # Immediately execute SL exit with market order
+                                        await self.execute_sl_exit()
                                         delattr(self, 'sl_hit_time')  # Reset for next time
                                 else:
                                     # Price moved back below SL, reset timer
@@ -2023,6 +2170,218 @@ Current Balance: ${balance:,.2f}"""
         except Exception as e:
             tprint(f"❌ Error validating EFS data requirements: {e}")
             return False
+    
+    def get_current_15m_candle_close(self) -> Optional[Dict]:
+        """Get the most recent completed 15m candle"""
+        if not self.csv_data:
+            return None
+        
+        current_time = datetime.now()
+        
+        # Look for the last completed 15m candle
+        for i in range(len(self.csv_data) - 1, -1, -1):
+            candle = self.csv_data[i]
+            candle_time = pd.to_datetime(candle['datetime'])
+            
+            # Must be a 15m boundary and completed (not current minute)
+            if candle_time.minute % 15 == 0 and candle_time < current_time:
+                return candle
+        
+        return None
+    
+    async def check_efs_exit_conditions(self):
+        """Check all EFS exit conditions on 15m candle close"""
+        try:
+            if not hasattr(self, 'efs_exit_conditions') or not self.current_position:
+                return
+            
+            conditions = self.efs_exit_conditions
+            
+            # Get current price
+            current_price = await self.get_current_price()
+            if current_price <= 0:
+                return
+            
+            # Get current 15m candle data
+            current_candle = self.get_current_15m_candle_close()
+            if not current_candle:
+                return
+            
+            # Calculate indicators for current candle
+            df = pd.DataFrame(self.historical_candles)
+            if len(df) == 0:
+                return
+            
+            df = self.calculate_indicators(df)
+            if len(df) == 0:
+                return
+            
+            latest = df.iloc[-1]
+            if latest is None:
+                return
+            
+            # Safely get indicator values with fallbacks
+            current_atr_15m = latest.get('atr_15m', 0.001)
+            current_entropy_zscore = latest.get('entropy_zscore', 0.0)
+            
+            # Validate ATR value
+            if pd.isna(current_atr_15m) or current_atr_15m <= 0:
+                current_atr_15m = 0.001
+            
+            # Update bars since entry
+            conditions['bars_since_entry'] += 1
+            
+            position_side = conditions['position_side']
+            entry_price = conditions['entry_price']
+            entry_atr = conditions['entry_atr_15m']
+            
+            # Calculate current MFE (Maximum Favorable Excursion)
+            if position_side == 'LONG':
+                mfe = current_price - entry_price
+                conditions['highest_favorable_price'] = max(conditions['highest_favorable_price'], current_price)
+            else:  # SHORT
+                mfe = entry_price - current_price
+                conditions['lowest_favorable_price'] = min(conditions['lowest_favorable_price'], current_price)
+            
+            tprint(f"🔍 EFS Exit Check - Bars: {conditions['bars_since_entry']} | MFE: ${mfe:.4f} | Price: ${current_price:.4f}")
+            
+            # EXIT PRIORITY (check in order):
+            
+            # 1. Hard SL (entry candle structure)
+            sl_hit = False
+            if position_side == 'LONG' and current_price <= conditions['sl_price']:
+                sl_hit = True
+            elif position_side == 'SHORT' and current_price >= conditions['sl_price']:
+                sl_hit = True
+            
+            if sl_hit:
+                tprint(f"🛑 EFS SL HIT - Entry candle structure breached!")
+                await self.send_telegram_message(f"🛑 EFS SL HIT - Entry candle structure breached!")
+                await self.execute_sl_exit()
+                return
+            
+            # 2. TP1 (fixed target) - already handled by limit order
+            if conditions.get('tp1_order_id'):
+                tp_filled = await self.monitor_order_status(conditions['tp1_order_id'], 1)
+                if tp_filled == "FILLED":
+                    tprint(f"🎯 TP1 filled!")
+                    await self.send_telegram_message(f"🎯 TP1 filled!")
+                    await self.handle_position_exit("TP1")
+                    return
+            
+            # 3. Entropy re-expansion exit
+            if not pd.isna(current_entropy_zscore) and abs(current_entropy_zscore) < 0.5:
+                tprint(f"🔄 EFS Entropy Re-expansion Exit - z-score: {current_entropy_zscore:.2f}")
+                await self.send_telegram_message(f"🔄 EFS Entropy Re-expansion Exit - z-score: {current_entropy_zscore:.2f}")
+                await self.execute_tp_exit()
+                return
+            
+            # 4. TP2 Trailing Stop Logic
+            await self.check_tp2_trailing_conditions(conditions, current_price, current_atr_15m, mfe, entry_atr)
+            
+        except Exception as e:
+            tprint(f"❌ Error checking EFS exit conditions: {e}")
+    
+    async def check_tp2_trailing_conditions(self, conditions, current_price, current_atr, mfe, entry_atr):
+        """Check TP2 trailing stop conditions and logic"""
+        try:
+            position_side = conditions['position_side']
+            entry_price = conditions['entry_price']
+            bars_since_entry = conditions['bars_since_entry']
+            
+            # Check if TP2 should be armed
+            if not conditions['tp2_armed']:
+                # Arming conditions:
+                # 1. MFE threshold: unrealized ≥ +0.55 × ATR(15m) from entry
+                mfe_threshold = 0.55 * entry_atr
+                
+                # 2. Bar confirmation: 1 closed 15m bar above entry + 0.30×ATR
+                bar_confirmation_level = entry_price + (0.30 * entry_atr) if position_side == 'LONG' else entry_price - (0.30 * entry_atr)
+                bar_confirmation = (position_side == 'LONG' and current_price > bar_confirmation_level) or \
+                                 (position_side == 'SHORT' and current_price < bar_confirmation_level)
+                
+                # 3. Warm-up bars: never arm before 2 bars elapsed since entry
+                warmup_complete = bars_since_entry >= 2
+                
+                if mfe >= mfe_threshold and bar_confirmation and warmup_complete:
+                    conditions['tp2_armed'] = True
+                    # Initialize trailing stop using snapshot entry_atr
+                    if position_side == 'LONG':
+                        conditions['current_trail'] = conditions['highest_favorable_price'] - (0.50 * entry_atr)
+                    else:
+                        conditions['current_trail'] = conditions['lowest_favorable_price'] + (0.50 * entry_atr)
+                    
+                    tprint(f"🎯 TP2 TRAILING ARMED! MFE: ${mfe:.4f} ≥ ${mfe_threshold:.4f} | Bars: {bars_since_entry} | Trail: ${conditions['current_trail']:.4f}")
+                    await self.send_telegram_message(f"🎯 TP2 TRAILING ARMED! Trail: ${conditions['current_trail']:.4f}")
+                else:
+                    tprint(f"⏳ TP2 not armed - MFE: ${mfe:.4f}/{mfe_threshold:.4f} | Bar conf: {bar_confirmation} | Warmup: {warmup_complete}")
+                    tprint(f"   📊 Details: Entry ATR: {entry_atr:.6f} | Current ATR: {current_atr:.6f} | Bar conf level: {bar_confirmation_level:.4f}")
+            
+            # If TP2 is armed, update trailing stop
+            if conditions['tp2_armed']:
+                if position_side == 'LONG':
+                    # Update highest favorable price
+                    conditions['highest_favorable_price'] = max(conditions['highest_favorable_price'], current_price)
+                    # Trail = max(previous_trail, HFP - 0.50 × entry_atr) - only ratchet tighter
+                    new_trail = conditions['highest_favorable_price'] - (0.50 * entry_atr)
+                    conditions['current_trail'] = max(conditions['current_trail'], new_trail)
+                    
+                    # Break-even shift: when MFE ≥ 0.30 × ATR, bump stop to max(current_stop, entry)
+                    if mfe >= (0.30 * entry_atr):
+                        conditions['current_trail'] = max(conditions['current_trail'], entry_price)
+                    
+                    # Check if trailing stop hit
+                    if current_price <= conditions['current_trail']:
+                        tprint(f"🎯 TP2 TRAILING STOP HIT! Price: ${current_price:.4f} ≤ Trail: ${conditions['current_trail']:.4f}")
+                        await self.send_telegram_message(f"🎯 TP2 TRAILING STOP HIT! Price: ${current_price:.4f} ≤ Trail: ${conditions['current_trail']:.4f}")
+                        await self.execute_tp_exit()
+                        return
+                    
+                else:  # SHORT
+                    # Update lowest favorable price
+                    conditions['lowest_favorable_price'] = min(conditions['lowest_favorable_price'], current_price)
+                    # Trail = min(previous_trail, LFP + 0.50 × entry_atr) - only ratchet tighter
+                    new_trail = conditions['lowest_favorable_price'] + (0.50 * entry_atr)
+                    conditions['current_trail'] = min(conditions['current_trail'], new_trail)
+                    
+                    # Break-even shift: when MFE ≥ 0.30 × ATR, bump stop to min(current_stop, entry)
+                    if mfe >= (0.30 * entry_atr):
+                        conditions['current_trail'] = min(conditions['current_trail'], entry_price)
+                    
+                    # Check if trailing stop hit
+                    if current_price >= conditions['current_trail']:
+                        tprint(f"🎯 TP2 TRAILING STOP HIT! Price: ${current_price:.4f} ≥ Trail: ${conditions['current_trail']:.4f}")
+                        await self.send_telegram_message(f"🎯 TP2 TRAILING STOP HIT! Price: ${current_price:.4f} ≥ Trail: ${conditions['current_trail']:.4f}")
+                        await self.execute_tp_exit()
+                        return
+                
+                tprint(f"📊 TP2 Trailing - HFP: ${conditions.get('highest_favorable_price', 0):.4f} | Trail: ${conditions['current_trail']:.4f} (0.50× entry ATR)")
+        
+        except Exception as e:
+            tprint(f"❌ Error in TP2 trailing logic: {e}")
+    
+    async def monitor_15m_closes(self):
+        """Monitor for 15m candle closes to trigger exit condition checks"""
+        try:
+            if not hasattr(self, 'last_15m_candle_time'):
+                self.last_15m_candle_time = None
+            
+            current_candle = self.get_current_15m_candle_close()
+            if not current_candle:
+                return
+            
+            candle_time = current_candle['datetime']
+            
+            # Check if this is a new 15m candle close
+            if self.last_15m_candle_time != candle_time:
+                self.last_15m_candle_time = candle_time
+                tprint(f"📅 New 15m candle closed: {candle_time}")
+                
+                # Run EFS exit condition checks
+                await self.check_efs_exit_conditions()
+        
+        except Exception as e:
+            tprint(f"❌ Error monitoring 15m closes: {e}")
 
 async def main():
     """Main function"""

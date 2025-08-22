@@ -20,10 +20,10 @@ INTERVAL = "Min15"
 # Auto-generate CSV filename based on symbol (lowercase, remove USDT)
 def get_csv_filename(symbol):
     if not symbol:
-        return "data.csv"
+        return "Live/Data/data.csv"
     # Remove _USDT and convert to lowercase
     clean_symbol = symbol.replace('_USDT', '').replace('_usdt', '').lower()
-    return f"data{clean_symbol}.csv"
+    return f"Live/Data/data{clean_symbol}.csv"
 
 CSV_FILENAME = get_csv_filename(SYMBOL)
 
