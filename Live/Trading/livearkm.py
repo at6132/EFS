@@ -29,11 +29,11 @@ def is_rate_limit_error(error_message: str) -> bool:
     return any(msg in str(error_message).lower() for msg in rate_limit_messages)
 
 # Telegram Configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8156711122:AAFYoW3ESDlxAjSfHO_DkjabgKZ3aUc3oRI")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7168811895")
+TELEGRAM_BOT_TOKEN = "8156711122:AAFYoW3ESDlxAjSfHO_DkjabgKZ3aUc3oRI"  # Use hardcoded value
+TELEGRAM_CHAT_ID = "7168811895"      # Use hardcoded value
 
 # GroupMe Configuration
-GROUPME_BOT_ID = os.getenv("GROUPME_BOT_ID", "2fc11058a4b66320f1bafc1593")  # Add your GroupMe bot ID here
+GROUPME_BOT_ID = "2fc11058a4b66320f1bafc1593"          # Use hardcoded value
 
 # MEXC SDK imports
 import sys
@@ -104,9 +104,9 @@ POSITION_CLOSE_COOLDOWN = 120         # Seconds cooldown after position close (2
 ENTROPY_CALCULATION_PERIOD = ENTROPY_BASE_DAYS   # Days needed for entropy mean/std calculations
 
 # Notification Settings
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Load from env only
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")      # Load from env only
-GROUPME_BOT_ID = os.getenv("GROUPME_BOT_ID")          # Load from env only
+TELEGRAM_BOT_TOKEN = "8156711122:AAFYoW3ESDlxAjSfHO_DkjabgKZ3aUc3oRI"  # Use hardcoded value
+TELEGRAM_CHAT_ID = "7168811895"      # Use hardcoded value
+GROUPME_BOT_ID = "2fc11058a4b66320f1bafc1593"          # Use hardcoded value
 
 # CSV File Configuration
 CSV_FILENAME = f"../Data/data{TRADING_SYMBOL.lower().split('_')[0]}.csv"  # ../Data/datadoge.csv for DOGE_USDT
