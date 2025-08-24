@@ -23,7 +23,7 @@ def get_csv_filename(symbol):
         return "Live/Data/data.csv"
     # Remove _USDT and convert to lowercase
     clean_symbol = symbol.replace('_USDT', '').replace('_usdt', '').lower()
-    return f"Live/Data/data{clean_symbol}.csv"
+    return f"data{clean_symbol}.csv"
 
 CSV_FILENAME = get_csv_filename(SYMBOL)
 
