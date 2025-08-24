@@ -53,10 +53,17 @@ from mexcpy.api import MexcFuturesAPI
 # - Pairs entropy collapse with volatility "fracture" - structural break in candle formation
 # 
 # DATA SOURCE:
-# - OHLCV: Local CSV file (dataarkm.csv) - 1-minute candles
+# - OHLCV: Local CSV file (datadoge.csv) - 15-minute candles
 # - Bid/Ask: MEXC futures API (only when in position)
 # - CSV Logging: All bid/ask data saved for analysis
 #
+
+# CSV TIMEFRAME CONFIGURATION - SINGLE SOURCE OF TRUTH
+CSV_TIMEFRAME_MIN = 15      # Set to 15 for 15-minute CSV bars
+BARS_PER_15M = int(15 / CSV_TIMEFRAME_MIN)
+BARS_PER_DAY = int(24 * 60 / CSV_TIMEFRAME_MIN)
+ENTROPY_BASE_DAYS = 30
+ENTROPY_MEAN_STD_WINDOW = ENTROPY_BASE_DAYS * BARS_PER_DAY
 
 # MEXC API Configuration
 from config import get_api_token, get_account_name
@@ -65,16 +72,16 @@ MEXC_API_TOKEN = get_api_token(TRADING_SYMBOL)
 USE_TESTNET = False                           # Set to False for live trading
 
 # Symbol-Specific Configuration
-SYMBOL_DECIMALS = 4                           # Number of decimal places for price (ARKM = 4)
-CONTRACTS_PER_SYMBOL = 10                     # Number of tokens per contract (ARKM = 10)
+SYMBOL_DECIMALS = 4                           # Number of decimal places for price (DOGE = 5)
+CONTRACTS_PER_SYMBOL = 10                     # Number of tokens per contract (DOGE = 100)
 MIN_CONTRACT_SIZE = 1                          # Minimum contract size
 MAX_CONTRACT_SIZE = 1000                       # Maximum contract size
 
 # Strategy Configuration - EFS Parameters
-POSITION_SIZE_PCT = 0.25                     # 5% of balance per trade
-LEVERAGE = 15                                 # 5x leverage
+POSITION_SIZE_PCT = 0.25                     # 25% of balance per trade
+LEVERAGE = 15                                 # 15x leverage
 RISK_PCT = 0.25                             # 2% risk per trade (for position sizing)
-ENTROPY_WINDOW = 30                          # Rolling window for entropy calculation (30 bars)
+ENTROPY_WINDOW = 30                          # Rolling window for entropy calculation (30 bars = 7.5 hours)
 ENTROPY_STD_THRESHOLD = 1.2                  # Entropy collapse threshold (1.2 std below mean)
 FRACTURE_COMPRESSION = 0.7                   # Fracture Index compression threshold
 TP1_ATR_MULTIPLIER = 0.8                    # TP1: 0.8 × ATR(15m)
@@ -89,20 +96,20 @@ PRICE_MOVEMENT_THRESHOLD = 0.0001            # 0.01% price movement threshold
 ROUND_TRIP_FEE = 0.0005                     # 0.05% round trip fees
 
 # Data Management
-MIN_CANDLES_REQUIRED = 30 * 24 * 4  # 30 days * 24 hours * 4 candles per hour (15m) = 2,880 candles for entropy calculations
+MIN_CANDLES_REQUIRED = ENTROPY_MEAN_STD_WINDOW  # Derived from timeframe configuration
 HISTORICAL_WINDOW_SIZE = 100          # Number of candles to keep in historical window
 CSV_CHECK_INTERVAL = 3                # Seconds between CSV checks (normal)
 CSV_CANDLE_DETECTED_WAIT = 45        # Seconds to wait after detecting a new candle
 POSITION_CLOSE_COOLDOWN = 120         # Seconds cooldown after position close (2 minutes)
-ENTROPY_CALCULATION_PERIOD = 30       # Days needed for entropy mean/std calculations
+ENTROPY_CALCULATION_PERIOD = ENTROPY_BASE_DAYS   # Days needed for entropy mean/std calculations
 
 # Notification Settings
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8156711122:AAFYoW3ESDlxAjSfHO_DkjabgKZ3aUc3oRI")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7168811895")
-GROUPME_BOT_ID = os.getenv("GROUPME_BOT_ID", "2fc11058a4b66320f1bafc1593")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Load from env only
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")      # Load from env only
+GROUPME_BOT_ID = os.getenv("GROUPME_BOT_ID")          # Load from env only
 
 # CSV File Configuration
-CSV_FILENAME = f"../Data/data{TRADING_SYMBOL.lower().split('_')[0]}.csv"  # ../Data/dataarkm.csv for ARKM_USDT
+CSV_FILENAME = f"../Data/data{TRADING_SYMBOL.lower().split('_')[0]}.csv"  # ../Data/datadoge.csv for DOGE_USDT
 ORDERBOOK_CSV_PREFIX = f"live_orderbook_{TRADING_SYMBOL.replace('_', '')}"
 
 # =============================================================================
@@ -110,7 +117,7 @@ ORDERBOOK_CSV_PREFIX = f"live_orderbook_{TRADING_SYMBOL.replace('_', '')}"
 class LiveEFSTrader:
     def __init__(self, token: str = MEXC_API_TOKEN, symbol: str = TRADING_SYMBOL, testnet: bool = USE_TESTNET):
         """
-        Initialize live EFS trader with Entropy Fracture Strategy using local CSV data for ARKM
+        Initialize live EFS trader with Entropy Fracture Strategy using local CSV data for DOGE
         """
         self.api = MexcFuturesAPI(token, testnet=testnet)
         self.symbol = symbol
@@ -179,9 +186,10 @@ class LiveEFSTrader:
         tprint(f"   Signal Cooldown: {SIGNAL_COOLDOWN}s")
         tprint(f"   Data Source: Local CSV + MEXC bid/ask")
         tprint(f"   Data logging: {ORDERBOOK_CSV_PREFIX}_{datetime.now().strftime('%Y%m%d')}.csv")
-        tprint(f"   Min candles required: {self.min_candles_required:,} candles ({ENTROPY_CALCULATION_PERIOD} days)")
+        tprint(f"   Min candles required: {self.min_candles_required:,} candles ({MIN_CANDLES_REQUIRED/BARS_PER_DAY:.1f} days)")
         tprint(f"   Strategy: Entropy Fracture Strategy (EFS) - Novel 15m framework")
         tprint(f"   Symbol Decimals: {SYMBOL_DECIMALS} | Contracts per symbol: {CONTRACTS_PER_SYMBOL}")
+        tprint(f"   CSV Timeframe: {CSV_TIMEFRAME_MIN}-minute bars | Bars per 15m: {BARS_PER_15M}")
         tprint(f"   ⚠️  EFS requires {ENTROPY_CALCULATION_PERIOD} days of data for entropy calculations!")
         tprint(f"   ⚠️  Without sufficient data, entropy collapse detection will not work properly!")
     
@@ -211,6 +219,19 @@ class LiveEFSTrader:
             
             # Filter out rows with empty OHLCV data
             df = df.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
+            
+            # SANITY CHECK: Verify data is 15-minute bars
+            ts = pd.to_datetime(df['datetime'])
+            if len(ts) > 1:
+                bar_spacing = ts.diff().dropna().mode()
+                if len(bar_spacing) > 0:
+                    expected_spacing = pd.Timedelta(minutes=15)
+                    actual_spacing = bar_spacing.iloc[0]
+                    if actual_spacing != expected_spacing:
+                        tprint(f"⚠️  WARNING: Data spacing is {actual_spacing}, expected {expected_spacing}")
+                        tprint(f"   This may cause incorrect signal generation!")
+                    else:
+                        tprint(f"✅ Verified: Data is 15-minute bars")
             
             # Convert to list of dictionaries
             self.csv_data = df.to_dict('records')
@@ -296,45 +317,19 @@ class LiveEFSTrader:
             tprint(f"❌ Error tailing CSV data: {e}")
             return []
     
-    def get_current_candle(self) -> Optional[Dict]:
-        """Get current candle from CSV data based on time"""
+    def get_current_candle(self):
+        """Get the most recent completed candle by timestamp"""
         if not self.csv_data:
             return None
-        
-        current_time = datetime.now()
-        
-        # Find the closest candle to current time
-        for candle in self.csv_data:
-            candle_time = pd.to_datetime(candle['datetime'])
-            if candle_time <= current_time:
-                return candle
-        
-        return self.csv_data[-1] if self.csv_data else None
+        df = pd.DataFrame(self.csv_data)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        now = pd.Timestamp.utcnow().tz_localize(None)
+        completed = df[df['datetime'] <= now]
+        return completed.iloc[-1].to_dict() if not completed.empty else None
     
-    def get_entry_candle(self) -> Optional[Dict]:
+    def get_entry_candle(self):
         """Get the 15m candle that triggered the entry signal"""
-        if not self.csv_data or len(self.csv_data) == 0:
-            return None
-        
-        # Find the most recent 15m candle (every 15th minute)
-        current_time = datetime.now()
-        
-        # Look for the last completed 15m candle
-        for i in range(len(self.csv_data) - 1, -1, -1):
-            candle = self.csv_data[i]
-            if not candle or 'datetime' not in candle:
-                continue
-            try:
-                candle_time = pd.to_datetime(candle['datetime'])
-                
-                # Check if this is a 15m boundary (minute % 15 == 0)
-                if candle_time.minute % 15 == 0:
-                    return candle
-            except (ValueError, TypeError, KeyError):
-                continue
-        
-        # Fallback: return the most recent candle
-        return self.csv_data[-1] if self.csv_data else None
+        return self.get_current_candle()
     
     def ensure_csv_headers(self):
         """Ensure CSV file has proper headers"""
@@ -373,7 +368,7 @@ class LiveEFSTrader:
             url = f"https://api.groupme.com/v3/bots/post"
             data = {
                 'bot_id': GROUPME_BOT_ID,
-                'text': f"🤖 BOT_11 (ARKM): {message}"
+                'text': f"🤖 BOT_11 (SEI): {message}"
             }
             
             async with self.tg_session.post(url, json=data) as response:
@@ -395,7 +390,7 @@ class LiveEFSTrader:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {
                 'chat_id': TELEGRAM_CHAT_ID,
-                'text': f"🤖 BOT_11 (ARKM): {message}",
+                'text': f"🤖 BOT_11 (SEI): {message}",
                 'parse_mode': 'HTML'
             }
             
@@ -420,7 +415,7 @@ class LiveEFSTrader:
                     if response.status == 200:
                         data = await response.json()
                         
-                        # Futures ticker format: {"success": true, "data": {"symbol": "ARKM_USDT", "bid1": "0.12340", "ask1": "0.12350", ...}}
+                        # Futures ticker format: {"success": true, "data": {"symbol": "DOGE_USDT", "bid1": "0.12340", "ask1": "0.12350", ...}}
                         ticker_data = data.get('data') or {}
                         
                         bid1 = ticker_data.get('bid1')
@@ -954,11 +949,11 @@ class LiveEFSTrader:
             
             # Calculate contract quantity from USD value
             # With leverage, we want to control a position worth (position_value_usd * leverage)
-            # Each contract = CONTRACTS_PER_SYMBOL ARKM, so we need to divide by (price * CONTRACTS_PER_SYMBOL)
+            # Each contract = CONTRACTS_PER_SYMBOL DOGE, so we need to divide by (price * CONTRACTS_PER_SYMBOL)
             leveraged_position_value = position_value_usd * self.leverage
             position_size = leveraged_position_value / (mid_price * CONTRACTS_PER_SYMBOL)
             
-            # Round position size to correct precision (ARKM allows whole contracts)
+            # Round position size to correct precision (DOGE allows whole contracts)
             position_size = round(position_size, 0)  # Round to whole number
             
             # Ensure minimum position size (at least MIN_CONTRACT_SIZE contract)
@@ -974,10 +969,10 @@ class LiveEFSTrader:
             tprint(f"💰 Balance: ${balance:,.2f}")
             tprint(f"💵 Position value: ${position_value_usd:,.2f} ({self.position_size_pct*100}%)")
             tprint(f"📊 Position size: {position_size:,.0f} contracts")
-            tprint(f"🔍 Debug: Balance=${balance:,.2f}, 5% margin=${position_value_usd:,.2f}, ARKM Price=${mid_price:.4f}")
+            tprint(f"🔍 Debug: Balance=${balance:,.2f}, 5% margin=${position_value_usd:,.2f}, DOGE Price=${mid_price:.4f}")
             tprint(f"🔍 Debug: Leveraged position value = ${leveraged_position_value:,.2f}")
             tprint(f"🔍 Debug: Contracts = ${leveraged_position_value:,.2f} / (${mid_price:.4f} * {CONTRACTS_PER_SYMBOL}) = {position_size:,.0f}")
-            tprint(f"🔍 Debug: Each contract = {CONTRACTS_PER_SYMBOL} ARKM, so {position_size:,.0f} contracts = {position_size * CONTRACTS_PER_SYMBOL:,.0f} ARKM")
+            tprint(f"🔍 Debug: Each contract = {CONTRACTS_PER_SYMBOL} DOGE, so {position_size:,.0f} contracts = {position_size * CONTRACTS_PER_SYMBOL:,.0f} DOGE")
             
             # Determine order side
             if signal_type == 'LONG':
@@ -1018,7 +1013,7 @@ class LiveEFSTrader:
             return False
     
     async def set_tp_sl_orders(self, position: Dict):
-        """Set EFS exit conditions: TP1 at 0.8× ATR(15m), TP2 trailing at 0.5× ATR(15m), SL at entry candle low/high"""
+        """Set EFS take profit orders: TP1 at 0.8× ATR(15m), TP2 trailing at 0.5× ATR(15m)"""
         try:
             entry_price = position.get('entry_price', 0)
             position_size = abs(position.get('size', 0))
@@ -1060,14 +1055,14 @@ class LiveEFSTrader:
                 tp2_price = entry_price + (self.tp2_atr_multiplier * entry_atr_15m)
                 tp1_side = OrderSide.CloseLong
                 
-                # SL: below entry candle low (the 15m candle we broke)
+                # SL: entry candle low (entry candle structure)
                 sl_price = entry_candle['low'] * 0.9997  # 0.03% buffer below entry candle low
             else:  # SHORT
                 tp1_price = entry_price - (self.tp1_atr_multiplier * entry_atr_15m)
                 tp2_price = entry_price - (self.tp2_atr_multiplier * entry_atr_15m)
                 tp1_side = OrderSide.CloseShort
                 
-                # SL: above entry candle high (the 15m candle we broke)
+                # SL: entry candle high (entry candle structure)
                 sl_price = entry_candle['high'] * 1.0003  # 0.03% buffer above entry candle high
             
             # Round prices to correct decimal places for symbol
@@ -1126,14 +1121,8 @@ class LiveEFSTrader:
         except Exception as e:
             tprint(f"❌ Error setting EFS TP/SL orders: {e}")
             await self.send_telegram_message(f"❌ Error setting EFS TP/SL orders: {e}")
-            # Fallback to basic monitoring
-            self.efs_exit_conditions = {
-                'entry_price': entry_price,
-                'tp1_price': entry_price * 1.02,
-                'sl_price': entry_price * 0.98,
-                'position_side': position.get('side'),
-                'position_size': position_size
-            }
+            self.manual_tp_monitor = True
+            self.manual_tp_price = entry_price * (1 + self.tp1_atr_multiplier * 0.01) if position.get('side') == 'LONG' else entry_price * (1 - self.tp1_atr_multiplier * 0.01)
     
     async def execute_sl_exit(self):
         """Execute SL exit immediately with market order"""
@@ -1511,8 +1500,25 @@ Current Balance: ${balance:,.2f}"""
                 tprint(f"🔄 EFS entropy exit triggered - closing position")
                 await self.send_telegram_message(f"🔄 EFS entropy exit triggered - closing position")
                 
-                # Execute entropy exit immediately with market order
-                await self.execute_tp_exit()  # Reuse TP exit method for any exit
+                # Close position with market order
+                close_side = OrderSide.CloseLong if position_side == 'LONG' else OrderSide.CloseShort
+                
+                close_request = CreateOrderRequest(
+                    symbol=self.symbol,
+                    side=close_side,
+                    vol=position_size,
+                    leverage=self.leverage,
+                    type=OrderType.MarketOrder,
+                    openType=OpenType.Isolated
+                )
+                
+                close_response = await self.api.create_order(close_request)
+                if close_response.success:
+                    tprint(f"✅ Position closed with entropy exit")
+                    await self.handle_position_exit("EFS Entropy Exit")
+                else:
+                    tprint(f"❌ Failed to close position: {close_response.message}")
+                
                 return
             
         except Exception as e:
@@ -1524,51 +1530,57 @@ Current Balance: ${balance:,.2f}"""
         return (best_bid + best_ask) / 2
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate EFS indicators: Shannon entropy, ATR, fracture index, and directional bias"""
+        """Calculate EFS indicators: Shannon entropy, ATR, fracture index, and directional bias on CSV timeframe bars"""
         try:
-            # Basic OHLCV calculations
-            df['body_size'] = abs(df['close'] - df['open'])
-            df['candle_range'] = df['high'] - df['low']
-            df['body_ratio'] = df['body_size'] / df['candle_range']
+            # Basic OHLCV calculations with divide-by-zero guard
+            df['candle_range'] = (df['high'] - df['low']).replace(0, np.nan)
+            df['body_size'] = (df['close'] - df['open']).abs()
+            df['body_ratio'] = (df['body_size'] / df['candle_range']).fillna(0.0)
             df['is_green'] = df['close'] > df['open']
             df['is_red'] = df['close'] < df['open']
             
             # Calculate returns for entropy
             df['returns'] = df['close'].pct_change()
             
-            # Shannon Entropy of returns (rolling window)
-            df['entropy'] = df['returns'].rolling(window=self.entropy_window).apply(self.calculate_shannon_entropy)
+            # Shannon Entropy of returns (rolling window on CSV timeframe bars)
+            df['entropy'] = df['returns'].rolling(window=self.entropy_window, min_periods=self.entropy_window).apply(self.calculate_shannon_entropy)
             
-            # 30-day rolling mean and std of entropy for normalization
-            df['entropy_mean_30d'] = df['entropy'].rolling(ENTROPY_CALCULATION_PERIOD*24*4).mean()  # ENTROPY_CALCULATION_PERIOD days in 15m candles (4 per hour)
-            df['entropy_std_30d'] = df['entropy'].rolling(ENTROPY_CALCULATION_PERIOD*24*4).std()
+            # Entropy mean/std sized in *bars* of your CSV timeframe
+            df['entropy_mean_30d'] = df['entropy'].rolling(ENTROPY_MEAN_STD_WINDOW, min_periods=ENTROPY_MEAN_STD_WINDOW).mean()
+            df['entropy_std_30d'] = df['entropy'].rolling(ENTROPY_MEAN_STD_WINDOW, min_periods=ENTROPY_MEAN_STD_WINDOW).std()
             
             # Entropy collapse detection (z-score)
             df['entropy_zscore'] = (df['entropy'] - df['entropy_mean_30d']) / df['entropy_std_30d']
             
-            # ATR calculations for different timeframes
-            df['atr_1m'] = self.calculate_atr(df, period=14)
-            df['atr_15m'] = self.calculate_atr(df, period=14)  # Will be resampled to 15m
+            # ATR calculations: true CSV timeframe ATR and approximate 15m ATR
+            atr_tf = self.calculate_atr(df, period=14)
+            atr_15m_sim = atr_tf.rolling(BARS_PER_15M).mean()
             
-            # Fracture Index: ATR(15m) / ATR(1m * 15)
-            # Since we're working with 1m data, we'll simulate 15m ATR by resampling
-            df['fracture_index'] = self.calculate_fracture_index(df)
+            df['atr_tf'] = atr_tf
+            df['atr_15m'] = atr_15m_sim
             
-            # Directional bias filter: EMA 20 vs EMA 50 slope
-            df['ema_20'] = df['close'].ewm(span=20).mean()
-            df['ema_50'] = df['close'].ewm(span=50).mean()
+            # Fracture Index = ATR(15m) / (ATR(TF) * BARS_PER_15M)
+            df['fracture_index'] = (atr_15m_sim / (atr_tf * BARS_PER_15M)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
             
-            # Calculate slopes (rate of change)
-            df['ema_20_slope'] = df['ema_20'].diff(5)  # 5-period slope
-            df['ema_50_slope'] = df['ema_50'].diff(5)  # 5-period slope
+            # Directional bias filter: EMA 20 vs EMA 50 slope on CSV timeframe bars
+            df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+            df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+            
+            # Calculate slopes (rate of change) - 5×CSV_TF ≈ 75m slope
+            df['ema_20_slope'] = df['ema_20'].diff(5)
+            df['ema_50_slope'] = df['ema_50'].diff(5)
             
             # Directional bias conditions
             df['bias_bullish'] = (df['ema_20'] > df['ema_50']) & (df['ema_20_slope'] > 0) & (df['ema_50_slope'] > 0)
             df['bias_bearish'] = (df['ema_20'] < df['ema_50']) & (df['ema_20_slope'] < 0) & (df['ema_50_slope'] < 0)
             
-            # Breakout levels for entry execution
-            df['high_15m'] = df['high'].rolling(15).max()  # 15-period high (simulating 15m)
-            df['low_15m'] = df['low'].rolling(15).min()    # 15-period low (simulating 15m)
+            # "15m breakout" levels computed from current CSV TF
+            df['high_15m'] = df['high'].rolling(BARS_PER_15M).max()
+            df['low_15m'] = df['low'].rolling(BARS_PER_15M).min()
+            
+            # Previous bar structure for entry/SL (not rolling window)
+            df['prev_high'] = df['high'].shift(1)
+            df['prev_low'] = df['low'].shift(1)
             
             # Volatility compression detection
             df['volatility_compression'] = df['fracture_index'] < self.fracture_compression
@@ -1632,28 +1644,7 @@ Current Balance: ${balance:,.2f}"""
             tprint(f"❌ Error calculating ATR: {e}")
             return pd.Series([0.0] * len(df))
     
-    def calculate_fracture_index(self, df: pd.DataFrame) -> pd.Series:
-        """Calculate Fracture Index: ATR(15m) / ATR(1m * 15)"""
-        try:
-            # Since we're working with 1m data, simulate 15m ATR
-            # ATR(15m) = average of 15 consecutive 1m ATR values
-            atr_1m = self.calculate_atr(df, period=14)
-            atr_15m_simulated = atr_1m.rolling(15).mean()
-            
-            # Fracture Index = ATR(15m) / (ATR(1m) * 15)
-            # This measures if 15m volatility is compressed relative to 1m
-            fracture_index = atr_15m_simulated / (atr_1m * 15)
-            
-            # Handle division by zero
-            fracture_index = fracture_index.replace([np.inf, -np.inf], np.nan)
-            fracture_index = fracture_index.fillna(1.0)  # Default to 1.0 (no fracture)
-            
-            return fracture_index
-            
-        except Exception as e:
-            tprint(f"❌ Error calculating fracture index: {e}")
-            return pd.Series([1.0] * len(df))
-    
+
     def check_efs_long_signal(self, candle: pd.Series) -> Optional[str]:
         """Check for EFS LONG signal: entropy collapse + fracture + bullish bias"""
         try:
@@ -1672,7 +1663,7 @@ Current Balance: ${balance:,.2f}"""
             # 3. Directional Bias: EMA20 > EMA50 and both sloping up
             directional_bias = candle['bias_bullish']
             
-            # 4. Breakout confirmation: price breaks above last 15m high
+            # 4. Breakout confirmation: price breaks above 15m high
             breakout_confirmed = candle['close'] > candle['high_15m']
             
             if entropy_collapse and fracture_trigger and directional_bias:
@@ -1705,7 +1696,7 @@ Current Balance: ${balance:,.2f}"""
             # 3. Directional Bias: EMA20 < EMA50 and both sloping down
             directional_bias = candle['bias_bearish']
             
-            # 4. Breakdown confirmation: price breaks below last 15m low
+            # 4. Breakdown confirmation: price breaks below 15m low
             breakdown_confirmed = candle['close'] < candle['low_15m']
             
             if entropy_collapse and fracture_trigger and directional_bias:
@@ -1749,7 +1740,7 @@ Current Balance: ${balance:,.2f}"""
             tprint(f"   📊 Entropy: {candle['entropy']:.4f} | Z-Score: {candle['entropy_zscore']:.2f}")
             tprint(f"   📈 Entropy Mean: {candle['entropy_mean_30d']:.4f} | Std: {candle['entropy_std_30d']:.4f}")
             tprint(f"   🔍 Fracture Index: {candle['fracture_index']:.4f} | Compression: {candle['volatility_compression']}")
-            tprint(f"   📊 ATR(1m): {candle['atr_1m']:.6f} | ATR(15m): {candle['atr_15m']:.6f}")
+            tprint(f"   📊 ATR(TF): {candle['atr_tf']:.6f} | ATR(15m): {candle['atr_15m']:.6f}")
             tprint(f"   📈 EMA20: ${candle['ema_20']:.4f} | EMA50: ${candle['ema_50']:.4f}")
             tprint(f"   🎯 Bias: {'BULLISH' if candle['bias_bullish'] else 'BEARISH' if candle['bias_bearish'] else 'NEUTRAL'}")
             tprint(f"   📊 High_15m: ${candle['high_15m']:.4f} | Low_15m: ${candle['low_15m']:.4f}")
@@ -1788,7 +1779,7 @@ Current Balance: ${balance:,.2f}"""
         tprint("📊 EFS Strategy:")
         tprint("   - Entropy Fracture Strategy: Novel 15m framework")
         tprint("   - Measures information entropy decay + volatility fractures")
-        tprint(f"   - OHLCV data: Local CSV file ({CSV_FILENAME}) - 1-minute candles")
+        tprint(f"   - OHLCV data: Local CSV file ({CSV_FILENAME}) - {CSV_TIMEFRAME_MIN}-minute candles")
         tprint("   - Best bid/ask: MEXC futures API (when in position)")
         tprint("   - Entry: Entropy collapse + fracture + directional bias + breakout")
         tprint("   - Exit: TP1 (0.8× ATR), TP2 trailing (0.5× ATR), entropy re-expansion")
@@ -1892,7 +1883,7 @@ Current Balance: ${balance:,.2f}"""
                         elif len(self.historical_candles) < self.min_candles_required:
                             # Not enough data for EFS
                             candles_missing = self.min_candles_required - len(self.historical_candles)
-                            days_missing = candles_missing / (24 * 60)
+                            days_missing = candles_missing / BARS_PER_DAY
                             tprint(f"⚠️  INSUFFICIENT DATA: Need {candles_missing:,} more candles ({days_missing:.1f} days) for EFS")
                             tprint(f"   ⚠️  EFS entropy calculations require {ENTROPY_CALCULATION_PERIOD} full days of data!")
                     last_csv_update = current_time
@@ -2032,7 +2023,8 @@ Current Balance: ${balance:,.2f}"""
                                     elif current_time - self.sl_hit_time >= 1:  # 1 second delay
                                         tprint(f"🛑 SL confirmed after 1 second! Current bid: {current_bid:.4f}, SL: {sl_price:.4f}")
                                         await self.send_telegram_message(f"🛑 SL CONFIRMED! Bid: ${current_bid:.4f}, SL: ${sl_price:.4f}")
-                                        await self.handle_sl_exit()
+                                        # Immediately execute SL exit with market order
+                                        await self.execute_sl_exit()
                                         delattr(self, 'sl_hit_time')  # Reset for next time
                                 else:
                                     # Price moved back above SL, reset timer
@@ -2049,7 +2041,8 @@ Current Balance: ${balance:,.2f}"""
                                     elif current_time - self.sl_hit_time >= 1:  # 1 second delay
                                         tprint(f"🛑 SL confirmed after 1 second! Current ask: {current_ask:.4f}, SL: {sl_price:.4f}")
                                         await self.send_telegram_message(f"🛑 SL CONFIRMED! Ask: ${current_ask:.4f}, SL: ${sl_price:.4f}")
-                                        await self.handle_sl_exit()
+                                        # Immediately execute SL exit with market order
+                                        await self.execute_sl_exit()
                                         delattr(self, 'sl_hit_time')  # Reset for next time
                                 else:
                                     # Price moved back below SL, reset timer
@@ -2073,7 +2066,7 @@ Current Balance: ${balance:,.2f}"""
     async def start_trading(self):
         """Start live EFS trading"""
         tprint("🚀 Starting live EFS trading...")
-        await self.send_telegram_message("🚀 BOT_11 (ARKM) Starting live EFS trading with CSV data...")
+        await self.send_telegram_message("🚀 BOT_11 (DOGE) Starting live EFS trading with CSV data...")
         
         # Get initial account balance
         balance = await self.get_account_balance()
@@ -2104,7 +2097,7 @@ Current Balance: ${balance:,.2f}"""
             
             # Calculate how many more candles we need
             candles_missing = self.min_candles_required - len(self.historical_candles)
-            days_missing = candles_missing / (24 * 60)
+            days_missing = candles_missing / BARS_PER_DAY
             tprint(f"📊 Need {candles_missing:,} more candles ({days_missing:.1f} days) for EFS to work")
         else:
             tprint("✅ Sufficient data available - EFS strategy ready to trade!")
@@ -2118,7 +2111,7 @@ Current Balance: ${balance:,.2f}"""
     async def stop_trading(self):
         """Stop live EFS trading"""
         tprint("🛑 Stopping live EFS trading...")
-        await self.send_telegram_message("🛑 BOT_11 (ARKM) Stopping live EFS trading...")
+        await self.send_telegram_message("🛑 BOT_11 (DOGE) Stopping live EFS trading...")
         self.is_trading = False
         
         # Cancel all orders
@@ -2141,7 +2134,7 @@ Current Balance: ${balance:,.2f}"""
         """Validate that we have sufficient data for EFS strategy"""
         try:
             if len(self.historical_candles) < self.min_candles_required:
-                days_available = len(self.historical_candles) / (24 * 4)  # Convert 15m candles to days (4 per hour)
+                days_available = len(self.historical_candles) / BARS_PER_DAY  # Convert candles to days using timeframe
                 days_needed = ENTROPY_CALCULATION_PERIOD
                 days_missing = days_needed - days_available
                 
@@ -2154,11 +2147,15 @@ Current Balance: ${balance:,.2f}"""
                 
                 return False
             else:
-                days_available = len(self.historical_candles) / (24 * 4)  # Convert 15m candles to days (4 per hour)
+                days_available = len(self.historical_candles) / BARS_PER_DAY  # Convert candles to days using timeframe
                 tprint(f"✅ SUFFICIENT DATA FOR EFS STRATEGY!")
                 tprint(f"   Available: {len(self.historical_candles):,} candles ({days_available:.1f} days)")
                 tprint(f"   Required: {self.min_candles_required:,} candles ({ENTROPY_CALCULATION_PERIOD} days)")
                 tprint(f"   ✅ Entropy calculations will work properly!")
+                
+                # SANITY CHECK: Assert enough bars for entropy baseline
+                assert len(self.historical_candles) >= ENTROPY_MEAN_STD_WINDOW, f"Need {ENTROPY_MEAN_STD_WINDOW} bars for entropy baseline, got {len(self.historical_candles)}"
+                tprint(f"   ✅ Data validation passed: {len(self.historical_candles)} >= {ENTROPY_MEAN_STD_WINDOW} candles")
                 
                 return True
                 
@@ -2166,23 +2163,7 @@ Current Balance: ${balance:,.2f}"""
             tprint(f"❌ Error validating EFS data requirements: {e}")
             return False
     
-    def get_current_15m_candle_close(self) -> Optional[Dict]:
-        """Get the most recent completed 15m candle"""
-        if not self.csv_data:
-            return None
-        
-        current_time = datetime.now()
-        
-        # Look for the last completed 15m candle
-        for i in range(len(self.csv_data) - 1, -1, -1):
-            candle = self.csv_data[i]
-            candle_time = pd.to_datetime(candle['datetime'])
-            
-            # Must be a 15m boundary and completed (not current minute)
-            if candle_time.minute % 15 == 0 and candle_time < current_time:
-                return candle
-        
-        return None
+
     
     async def check_efs_exit_conditions(self):
         """Check all EFS exit conditions on 15m candle close"""
@@ -2198,7 +2179,7 @@ Current Balance: ${balance:,.2f}"""
                 return
             
             # Get current 15m candle data
-            current_candle = self.get_current_15m_candle_close()
+            current_candle = self.get_current_candle()
             if not current_candle:
                 return
             
@@ -2360,7 +2341,7 @@ Current Balance: ${balance:,.2f}"""
             if not hasattr(self, 'last_15m_candle_time'):
                 self.last_15m_candle_time = None
             
-            current_candle = self.get_current_15m_candle_close()
+            current_candle = self.get_current_candle()
             if not current_candle:
                 return
             
@@ -2399,23 +2380,23 @@ async def main():
         await trader.start_trading()
     except KeyboardInterrupt:
         tprint("\n🛑 Interrupted by user")
-        await trader.send_telegram_message("🛑 BOT_11 (ARKM) EFS trading interrupted by user")
+        await trader.send_telegram_message("🛑 BOT_11 (DOGE) EFS trading interrupted by user")
     except Exception as e:
         tprint(f"❌ Fatal error: {e}")
-        await trader.send_telegram_message(f"❌ BOT_11 (ARKM) EFS trading fatal error: {e}")
+        await trader.send_telegram_message(f"❌ BOT_11 (DOGE) EFS trading fatal error: {e}")
     finally:
         # Stop EFS trading
         await trader.stop_trading()
 
 if __name__ == "__main__":
-    tprint("🚀 Live Entropy Fracture Strategy (EFS) Trader - ARKM (CSV Data)")
+    tprint("🚀 Live Entropy Fracture Strategy (EFS) Trader - DOGE (CSV Data)")
     tprint("⚠️  WARNING: This is live trading software!")
     tprint("   Make sure to:")
     tprint("   1. Add your MEXC API token")
     tprint("   2. Test on testnet first")
     tprint("   3. Review all EFS parameters")
     tprint("   4. Monitor the bot carefully")
-    tprint(f"   5. Ensure {CSV_FILENAME} is being updated with live 15-minute OHLCV data")
+    tprint(f"   5. Ensure {CSV_FILENAME} is being updated with live {CSV_TIMEFRAME_MIN}-minute OHLCV data")
     tprint("")
     tprint("🔍 EFS Strategy Overview:")
     tprint("   - Entropy collapse detection (z-score < -1.2)")
@@ -2426,8 +2407,8 @@ if __name__ == "__main__":
     tprint("   - Entropy re-expansion exit")
     tprint("")
     tprint("📊 CRITICAL DATA REQUIREMENTS:")
-    tprint(f"   - EFS requires {ENTROPY_CALCULATION_PERIOD} FULL DAYS of 15-minute data")
-    tprint(f"   - Minimum: {MIN_CANDLES_REQUIRED:,} candles ({MIN_CANDLES_REQUIRED/(24*4):.1f} days)")
+    tprint(f"   - EFS requires {ENTROPY_CALCULATION_PERIOD} FULL DAYS of {CSV_TIMEFRAME_MIN}-minute data")
+    tprint(f"   - Minimum: {MIN_CANDLES_REQUIRED:,} candles ({MIN_CANDLES_REQUIRED/BARS_PER_DAY:.1f} days)")
     tprint("   - Without sufficient data, entropy calculations will fail")
     tprint("   - Strategy will not work until data requirements are met")
     tprint("")
